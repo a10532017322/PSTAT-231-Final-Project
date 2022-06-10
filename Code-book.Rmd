@@ -1,0 +1,44 @@
+---
+title: "Code Book"
+author: "David Li"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# All Variables Used in The Project
+
+**Response Variable**
+
+- `Price`: The price of the house per square meter.($CNY/m^2$)
+
+**Predictor Variable**
+
+- Continuous Variables
+  - `dom`: Active days on market. 
+  - `followers`: The number of people follow the transaction.
+  - `square`: the square of the house.
+  - `ladderratio`: The proportion between number of residents on the same floor and the number elevator of ladder. It describes how many ladders a resident have on average.
+  - `floor`: The floor of the house.
+  - `livingroom`: The number of living room.
+  - `drawingroom`: The number of drawing room.
+  - `kitchen`: The number of kitchen.
+  - `bathroom`: The number of bathroom.
+  
+- Date Variables
+  - `tradetime`: The time of transaction. (From 2011 to 2017)
+  - `constructiontime`: The year of construction.
+  
+- Categorical Variables
+  - `subway`: Yes(1), no(0)
+  - `buildingtype`: tower(1), bungalow(2), combination of plate and tower(3), plate(4).
+  - `renovationconditioin`: other(1), rough(2), Simplicity(3), hardcover(4).
+  - `Buildingstructure`: unknow(1), mixed(2), brick and wood(3), brick and concrete(4), steel(5), steel and concrete(6).

@@ -1,0 +1,528 @@
+---
+title: "Housing Price in Beijing (2011-2017)"
+author: "David Li"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, echo = TRUE)
+```
+
+
+# Introduction
+
+
+The purpose of this project is to generate a model that will predict the housing prices in Beijing using several predictors.
+
+This data set is found on Kaggle and it records the housing price of Beijing listed from 2011 to 2017, fetching from Lanjia.com. There are 318,851 observations and 26 columns in this data set. 
+
+Data URL: https://www.kaggle.com/datasets/ruiqurm/lianjia
+
+
+
+## Loading data and Packages
+
+Of 26 columns in the dataset, we will choose some of them as predictors. Some columns are dropped because they are irrelevant or the linear transformation of the other variables, like `The total price of the house`. 
+
+There are some key variables for the model fitting:
+
+
+
+**Response Variable**
+
+- `Price`: The price of the house per square meter.($CNY/m^2$)
+
+**Predictor Variable**
+
+- Continuous Variables
+  - `dom`: Active days on market. 
+  - `followers`: The number of people follow the transaction.
+  - `square`: the square of the house.
+  - `ladderratio`: The proportion between number of residents on the same floor and the number elevator of ladder. It describes how many ladders a resident have on average.
+  - `floor`: The floor of the house.
+  - `livingroom`: The number of living room.
+  - `drawingroom`: The number of drawing room.
+  - `kitchen`: The number of kitchen.
+  - `bathroom`: The number of bathroom.
+  
+- Date Variables
+  - `tradetime`: The time of transaction. (From 2011 to 2017)
+  - `constructiontime`: The year of construction.
+  
+- Categorical Variables
+  - `subway`: Yes(1), no(0)
+  - `buildingtype`: tower(1), bungalow(2), combination of plate and tower(3), plate(4).
+  - `renovationconditioin`: other(1), rough(2), Simplicity(3), hardcover(4).
+  - `Buildingstructure`: unknow(1), mixed(2), brick and wood(3), brick and concrete(4), steel(5), steel and concrete(6).
+  
+```{r Loading data and packages, message= FALSE}  
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(rpart.plot)
+library(janitor)
+library(corrplot)
+library(glmnet)
+library(lubridate)
+library(ggplot2)
+library(kknn)
+library(vip)
+tidymodels_prefer()
+set.seed(1234)
+dataset = read.csv("C:/Users/a1053/Desktop/PSTAT 231/Final Project/new.csv")
+```
+
+# Data Cleaning & Manipulation
+
+Before data analysis, the data set needs to be cleaned to move forward.
+
+- Clean names
+```{r Clean names}
+dataset = dataset%>%
+  clean_names(parsing_option=0)
+```
+
+- Select variables
+```{r Data Cleaning}
+House_dataset = dataset%>%
+  select(price,dom,followers,square,ladderratio,floor,livingroom,drawingroom,kitchen,bathroom,tradetime,constructiontime,buildingtype,renovationcondition,buildingstructure,subway)
+```
+
+- For the floor variable, there are some Chinese characters before the number that needs to be removed. 
+```{r}
+House_dataset$floor = as.numeric(gsub(".*?([0-9]+).*","\\1",House_dataset$floor))
+```
+
+- Convert date variables
+
+```{r}
+House_dataset$tradetime = ymd(House_dataset$tradetime)
+House_dataset$constructiontime = as.Date(House_dataset$constructiontime,"%Y")
+```
+
+- Drop nas
+
+```{r}
+House_dataset = House_dataset%>%
+  na.omit()
+```
+
+- Convert `constructiontime` to a new numeric variable that is called `HouseAge`, which is the difference between years of the `constructiontime` and the `tradetime`.
+
+```{r}
+House_dataset = House_dataset%>%
+  mutate(Houseage = year(tradetime) - year(constructiontime))
+```
+
+
+- Filter out non-integer observations with rooms, kitchen, and building type. Convert them to numeric variables. 
+
+```{r}
+House_dataset = House_dataset%>%
+  mutate(drawingroom = as.numeric(drawingroom),
+         kitchen = as.numeric(kitchen),
+         bathroom = as.numeric(bathroom),
+         livingroom = as.numeric(livingroom))%>%
+  filter(bathroom%%1==0,
+         kitchen%%1==0,
+         drawingroom%%1==0,
+         buildingtype%%1==0,
+         livingroom%%1==0)
+```
+
+- Make `buildingtype`, `renovationcondition`, `subway`, and `buildingstructure` factors.
+
+```{r}
+House_dataset = House_dataset%>%
+  mutate(buildingtype = factor(buildingtype, labels = c(`1` = "tower", `2` = "bungalow", `3` = "combination of plate and tower", `4` = "plate" )))%>%
+  mutate(renovationcondition = factor(renovationcondition, labels = c(`1` = "other", `2` = "rough", `3` = "simplicity", `4` = "hardcover")))%>%
+  mutate(subway = factor(subway, labels = c(`1` = "Yes", `0` = "No"),levels = c(1,0)))%>%
+  mutate(buildingstructure = factor(buildingstructure, labels = c (`1` = "unknown", `2` = "mixed", `3` = "brick and wood", `4` = "brick and concrete", `5` = "steel", `6` = "steel-concrete composite")))
+```
+
+- Remove trades before 2011.
+
+```{r}
+House_dataset = House_dataset%>%
+  filter(tradetime>mdy("01,01,2011"))
+```
+
+
+- Remove `price` less than 5000. The home sellers might intend to rent it out but list it in the wrong place.
+
+```{r}
+House_dataset = House_dataset%>%
+  filter(price > 5000)
+```
+
+
+- Transform `tradetime` variable to numeric. We set 01/01/2011 as the starting point and create a new variable called `timediff` that is the difference in days between the `tradetime` and 01/01/2011.
+
+```{r}
+House_dataset = House_dataset%>%
+  mutate(timediff = as.numeric(tradetime - mdy("01,01,2011")))
+```
+
+- After cleaning, we have `r nrow(House_dataset)` observations left comparing to 318,851 observations before filtering. 
+
+
+
+# Data Split
+
+The data was split in a 80% training, 20% testing split. Stratified sample was used as `price` is right skewed. 
+
+```{r}
+House_split = initial_split(House_dataset, prop = 0.8, strata = price)
+
+House_train = training(House_split)
+
+House_test = testing(House_split)
+```
+
+
+There are `r nrow(House_train)` observations in the training data set and `r nrow(House_test)` observations in the testing data set.
+
+# Exploratory Data Analysis
+
+The exploratory data analysis will be based on the testing data set. 
+
+## House Price
+
+The histogram shows that most of the houses were traded between 20000 and 40000. 
+```{r}
+ggplot(House_train,aes(price))+geom_histogram() + labs(title="House Price Histogram", x= "CNY per Square Meters")
+```
+
+## Price with Categorical Predictors & Time
+
+The price per square increases over time. We can also see that we have more observations of the trades after 2015, and the variance is increasing as well.
+```{r}
+ggplot(House_train, aes(tradetime,price))+geom_point(alpha=0.05)+geom_smooth(method = "lm")+labs(y="CNY per Square Meters",title = "House Price Over Time",x = "Time")
+```
+
+It is obvious that the house near subway are traded at a higher price. 
+```{r}
+ggplot(House_train, aes(tradetime,price,color = subway))+geom_point(alpha=0.01)+geom_smooth(method = "lm")+labs(y="CNY per Square Meters",title = "House Price Over Time With/Without Subway",x = "Time")
+```
+
+The bungalow type of the house are sold at a higher price per squared meter. It makes sense because bungalow is a luxury in Beijing with such high population density. There is no difference of the other types. 
+
+```{r}
+ggplot(House_train, aes(tradetime,price,color = buildingtype))+geom_point(alpha=0.03)+geom_smooth(method = "lm",se=FALSE)+labs(y="CNY per Square Meters",title = "House Price Over Time With Difference Building Type",x = "Time")
+```
+
+We would expect that a hardcover house should sold at a higher price, and in fact it is higher than a rough condition. The "other" type is annoying because we don't know what it is. 
+```{r}
+ggplot(House_train, aes(tradetime,price,color = renovationcondition))+geom_point(alpha=0.03)+geom_smooth(method = "lm",se=FALSE,formula = y ~ x)+labs(y="CNY per Square Meters",title = "House Price Over Time With Different Renovation Condition",x = "Time")+ylim(c(0,160000))
+```
+
+From this plot we know why a "other" type house has a different trend. We have more observations of the "other" type before 2014. 
+```{r}
+ggplot(House_train, aes(tradetime,price,color = renovationcondition))+geom_point(alpha=0.03)+geom_smooth(method = "lm",se=FALSE)+labs(y="CNY per Square Meters",title = "House Price Over Time With Different Renovation Condition",x = "Time")+ylim(c(0,160000)) + facet_grid(rows = vars(renovationcondition))
+```
+
+The brick and wood is higher than other type might because most of the bungalows are built with that material. 
+```{r}
+ggplot(House_train, aes(tradetime,price,color = buildingstructure))+geom_point(alpha=0.03)+geom_smooth(method = "lm",se=FALSE)+labs(y="CNY per Square Meters",title = "House Price Over Time With Different Building Structure",x = "Time")+ylim(c(0,160000))
+```
+
+## Continuous Predictors
+
+From this graph, we do have some interesting findings. Price is barely correlated with other continuous variables. However, it seems like the older house is traded at a higher price. 
+```{r}
+Continuous_df = House_train%>%
+  select(price:bathroom,Houseage)%>%
+  drop_na()
+D = cor(Continuous_df)
+corrplot(D, method = "number")
+```
+
+# Model Building
+
+- Deselect the date variables
+```{r}
+House_train = House_train%>%
+  select(-tradetime,-constructiontime)
+```
+
+
+- Fold the training data with 5 folds and stratify sample the folds by price. 5 folds is chosen to reduce the computation time.
+```{r}
+train_folds = vfold_cv(House_train,v = 5,strata = price)
+```
+
+- Create a recipe. All predictors is shown in the table. 
+
+```{r}
+House_recipe = recipe(price ~ .,data=House_train)%>%
+  step_dummy(all_nominal_predictors())%>%
+  step_normalize(all_predictors())
+
+House_recipe%>%
+  prep()%>%
+  juice()
+```
+
+## Lasso & ridge regression
+
+- Set up the `regression` model using `glmnet` engine. We tune penalty and mixture to a probable range and fit them with 10 levels. 
+
+```{r}
+elastic_net_spec = linear_reg(penalty = tune(),
+                                mixture = tune())%>%
+  set_mode("regression")%>%
+  set_engine("glmnet")
+
+en_workflow = workflow()%>%
+  add_recipe(House_recipe)%>%
+  add_model(elastic_net_spec)
+
+en_grid = grid_regular(penalty(range= c(-5,5)),
+                       mixture(range = c(0,1)),levels = 10)
+```
+
+- Fit the model and save the result.
+
+```{r, eval=FALSE}
+en_tune_res = tune_grid(
+  en_workflow,
+  resamples = train_folds,
+  grid = en_grid,
+  control = control_grid(verbose = TRUE),
+  metrics = metric_set(rmse)
+)
+save(en_tune_res,file = "en_tune.rda")
+```
+
+
+## Random Forest
+
+- Set up the random forest model. The engine is set to be `ranger`, and we tune `mtry` and `min_n`.
+
+```{r}
+rf_model = rand_forest(
+  min_n = tune(),
+  mtry = tune(),
+  mode = "regression")%>%
+  set_engine("ranger")
+```
+
+- Set up the tune grid. Because we have 16 predictors, so the range for `mtry` is set to be little smaller than that to add the randomness. The default `min_n` is 5 for regression model so I set it around 5. The `levels` is set to be 3, and more levels is not possible due to the computational limitation.
+
+```{r}
+rf_grid = grid_regular(mtry(range = c(2,15)),min_n(range = c(2,10)),levels = 3)
+
+rf_workflow = workflow()%>%
+  add_recipe(House_recipe)%>%
+  add_model(rf_model)
+```
+
+ - Fit the model and save the result. 
+
+```{r , eval = FALSE}
+rf_tune_res = tune_grid(
+  rf_workflow,
+  resamples = train_folds,
+  grid = rf_grid,
+  control = control_grid(verbose = TRUE),
+  metrics = metric_set(rmse)
+)
+save(rf_tune_res,file = "rf_tune.rda")
+```
+
+
+## Boosted Tree
+
+- Set up the boosted tree model. We tune the `min_n`,`mtry`, and `learn_rate`. 
+
+```{r}
+bt_model <- boost_tree(mode = "regression",
+                       min_n = tune(),
+                       mtry = tune(),
+                       learn_rate = tune()) %>% 
+  set_engine("xgboost")
+bt_workflow <- workflow() %>% 
+  add_model(bt_model) %>% 
+  add_recipe(House_recipe)
+bt_grid = grid_regular(mtry(range = c(2,15)),min_n(range = c(2,10)), learn_rate(range = c(-5,0.2)),levels = 3)
+```
+
+- Tune the grid and save the result.
+
+```{r, eval = FALSE}
+bt_tune_res = tune_grid(
+  bt_workflow,
+  resamples = train_folds,
+  grid = bt_grid,
+  control = control_grid(verbose = TRUE),
+  metrics = metric_set(rmse)
+)
+save(bt_tune_res,file = "bt_tune.rda")
+```
+
+## Nearest Neighbors
+
+- Set up the Knn model with mode to be `regression`, engine to be `kknn`. We tune the neighbors with 3 levels.
+
+```{r}
+knn_model = nearest_neighbor(
+  neighbors = tune(),
+  mode = "regression"
+)%>%
+  set_engine("kknn")
+
+knn_workflow = workflow()%>%
+  add_model(knn_model)%>%
+  add_recipe(House_recipe)
+```
+
+```{r}
+knn_params <- parameters(knn_model)
+
+knn_grid <- grid_regular(knn_params, levels = 3)
+```
+
+- Tune the grid and save the result.
+
+```{r, eval = FALSE}
+Knn_tune_res = tune_grid(
+  knn_workflow,
+  resamples = train_folds,
+  grid = knn_grid,
+  control = control_grid(verbose = TRUE),
+  metrics = metric_set(rmse)
+)
+save(Knn_tune_res,file = "knn_tune.rda")
+```
+
+# Compare Model Results
+
+- Load saved data
+
+```{r}
+load("en_tune.rda")
+load("rf_tune.rda")
+load("bt_tune.rda")
+load("knn_tune.rda")
+```
+
+## Lasso and Ridge Regression
+- From the plot, we can see that rmse increases as we adding more penalty mixture, which makes sense. 
+
+```{r}
+autoplot(en_tune_res)
+```
+
+We can see the value of `rmse` using the `show_best()` function. The smaller the mean value of rmse indicate a better fit for the regression model. 
+
+For the lasso and ridge regression fit, the best value is `18955.23`. It is really strange that we have the same mean across all fits, which indicates that all fits lead to a same model and result. 
+
+```{r}
+show_best(en_tune_res)%>%select(-.estimator,-.config)
+```
+
+## Random Forest
+
+For the random forest model, the `rmse` decreases as we fit in more predictors. 
+
+```{r}
+autoplot(rf_tune_res)
+```
+
+The best result for the random forest model is `15068.23`. 
+
+```{r}
+show_best(rf_tune_res)%>%select(-.estimator,-.config)
+```
+
+## Boosted Tree
+
+```{r}
+autoplot(bt_tune_res)
+```
+
+The best result for the boosted tree model is `17614.74`. 
+
+```{r}
+show_best(bt_tune_res)%>%select(-.estimator,-.config)
+```
+
+## Nearest Neighbors
+
+```{r}
+autoplot(Knn_tune_res)
+```
+The best result for the nearest neighbor model is `17181.97`. 
+
+```{r}
+show_best(Knn_tune_res)%>%select(-.estimator,-.config)
+```
+
+The random forest model has the best result with mean = `15068.23`, which has `mtry` = 15 and `min_n` = 2.
+
+## Final Model Building
+
+Use `select_best` function to extract the parameters of our fit, and then we create our final fit using the *random forest model*. 
+
+```{r, eval = FALSE}
+best_forest = select_best(rf_tune_res)
+forest_final = finalize_workflow(rf_workflow,best_forest)
+
+forest_final_fit = fit(forest_final, House_train)
+save(forest_final_fit,file = "forest_final_fit.rda")
+```
+
+
+## Analysis of The Test Set (Random Forest Model)
+
+Load the saved fit. 
+
+```{r}
+load("forest_final_fit.rda")
+```
+
+Fit it to the testing data set. We find out our testing estimate is `14761.04`, which is lower than our estimate before. It means that we don't have over fitting issue. 
+
+```{r}
+augment(forest_final_fit,new_data = House_test)%>%
+  rmse(truth = price, estimate = .pred)
+```
+
+For our final fit, we have `500` trees, `15` mtry, and node size of `2`. We have a R Squared equals `61.78%`. 
+
+```{r}
+forest_final_fit
+```
+
+
+
+We are interested in the patterns of the predicted result. We bind the prediction with other predictors and our response variable.
+
+```{r}
+prediction_set = predict(forest_final_fit,new_data = House_test)%>%
+  cbind(House_test$price,House_test$tradetime)
+```
+
+From these two plots, we notice that the residuals over time are symmetric over the x axis. Because we have more observations for the later period, the variance also increases. 
+
+```{r}
+ggplot(prediction_set,aes(House_test$tradetime,(House_test$price - .pred)))+geom_point(alpha = 0.1)+ labs(title = "Residuals by Time", x = "Time", y = "Difference in Price Per Sqaured Meters") 
+```
+
+# Conclusion
+
+Through several steps of data cleaning, exploratory analysis, cross-validation, and model fitting, we have derived a model that does fairly good job at predicting the Beijing house prices. 
+
+At the beginning of data cleaning process, we chose 15 predictors out of 26 columns. We select those predictors because we believe these can best represent the house prices. We have explored the features of these predictors in the exploratory analysis stage, which confirms our belief that some predictors have higher influential power on the response variable than the others. 
+
+After that, we create our recipe and fit it with four different models. Of these four models, we choose random forest model at the end because it has the lowest `rmse`. After we fit it to the testing data, the `rmse` of the final fit is less than what we have using the training data. It means that the fit does not have over fitting issue. 
+
+There are some other predictors included the data set are worth to explore in the future analysis. The data set includes house `latitude` and `longitude` information. Fitting these predictors may require multidimensional model to better represent the price. The current method may cause bias in prediction. This is because house price varies by sector, so `latitude` and `longitude` cannot be separate predictors. 
+
+At the end, we believe that the result of this study could provide some guidance to forecast the real world house prices by using the final fit and its parameters. 
